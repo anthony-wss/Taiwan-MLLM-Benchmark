@@ -42,7 +42,8 @@ python3 tmlu_eval.py \
     --subsets ALL \
     --tensor_parallel_size 1 \
     --log_dir <log_dir> \
-    --few_shot_num 5 \
+    --few_shot_num 0 \ # To prevent <think> from being suppressed
+    --apply_chat_template \ # New: add chat template
     --cot
 ```
 
