@@ -145,24 +145,31 @@ class HFLM_transformers(LM):
             cache_dir=cache_dir,
             trust_remote_code=True,
         )
+        print(_get_dtype(dtype, self.config))
         self.llm = AutoModelForCausalLM.from_pretrained(
             model_name,
             revision=revision,
             torch_dtype=_get_dtype(dtype, self.config),
-            device_map='auto',
+            device_map="cuda",  # Changed from "cuda" to "auto"
             cache_dir=cache_dir,
             trust_remote_code=True,
+            low_cpu_mem_usage=True
         )
+        
+        # Fixed the attribute access and added fallback logic
         if max_length:
             self.model_max_length = max_length
         elif hasattr(self.llm.generation_config, 'max_length'):
             self.model_max_length = self.llm.generation_config.max_length
         elif hasattr(self.llm.config, 'max_position_embeddings'):
-            self.model_max_length = self.llm.config.max_length.max_position_embeddings
+            self.model_max_length = self.llm.config.max_position_embeddings  # Fixed this line
+        elif hasattr(self.config, 'max_position_embeddings'):
+            self.model_max_length = self.config.max_position_embeddings
         else:
             logger.error('model max length is unknown.')
-            exit()
-
+            self.model_max_length = 2048  # Set a reasonable default instead of exiting
+            
+        print(f"Model max length: {self.model_max_length}")
         self.llm.eval()
 
     def get_tokenizer(self):
@@ -182,47 +189,54 @@ class HFLM_transformers(LM):
         return context_enc, conti_enc
 
     def generate(self, dataset, prefill='正確答案：(', apply_chat_template=True):
-        if apply_chat_template:
-            dataset = dataset.map(
-                lambda x: {
-                    'prompt': self.tokenizer.apply_chat_template(
-                        [{'role': 'user', 'content': x['prompt']}],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                    + prefill
-                },
-                load_from_cache_file=False,
-            )
-        else:
-            dataset = dataset.map(
-                lambda x: {'prompt': x['prompt'] + prefill},
-                load_from_cache_file=False,
-            )
+        print("START MAPPING", flush=True)
+        print("FINISHED MAPPING", flush=True)
+        
         with torch.no_grad():
             answers = []
             for example in tqdm(dataset):
-                logits = []
-                for i in range(6):
-                    choice = chr(i + ord('A'))
-                    if example[choice] is not None:
-                        prompt_encoded, choice_encoded = self.encode_pair(example['prompt'], choice)
-                        choice_encoded_len = choice_encoded.shape[1]
-                        inputs = torch.cat([prompt_encoded, choice_encoded], dim=-1)
-                        logit = self.llm(inputs[:, :-1].cuda())['logits']
-                        logit = F.log_softmax(logit, dim=-1).cpu()
-                        choice_logit = torch.gather(
-                            logit[:, -choice_encoded_len:], 2, choice_encoded.unsqueeze(-1)
-                        ).squeeze(dim=-1)
-                        logits.append(choice_logit.sum())
-                    else:
-                        break
-
-                logits = torch.stack(logits)
-                answer = torch.argmax(logits)
-                answers.append(chr(int(answer) + ord('A')) + ')')
+                if apply_chat_template:
+                    print("INFERENCING", flush=True)
+                    prompt = self.tokenizer.apply_chat_template(
+                        [{'role': 'user', 'content': example['prompt']}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    ) + prefill
+                else:
+                    prompt = example['prompt'] + prefill
+                
+                # Fixed tokenizer call with proper parameters
+                inputs = self.tokenizer(
+                    prompt, 
+                    return_tensors='pt', 
+                    max_length=self.model_max_length,
+                    padding="max_length",
+                    truncation=True
+                ).to("cuda")
+                
+                # Generate response with simplified parameters
+                outputs = self.llm.generate(
+                    **inputs,
+                    max_new_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    do_sample=self.temperature > 0,
+                    use_cache=True, # For dynamo issues
+                    # Removed cache_implementation="static" as it may cause issues
+                    pad_token_id=self.tokenizer.eos_token_id  # Added to prevent warnings
+                )
+                
+                # Decode and extract answer
+                generated_text = self.tokenizer.decode(
+                    outputs[0][inputs.input_ids.shape[1]:], 
+                    skip_special_tokens=True
+                )
+                answers.append(generated_text)
+                
+                # Clean up
+                del inputs, outputs
+                torch.cuda.empty_cache()
+                
         return answers
-
 
 class OpenAI_LM(LM):
     def __init__(

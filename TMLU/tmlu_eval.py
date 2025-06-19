@@ -139,6 +139,11 @@ def parse_args():
     parser.add_argument(
         '--apply_chat_template', action='store_true', help='Apply chat template on the prompts.'
     )
+    parser.add_argument(
+        '--freeform',
+        action='store_true',
+        help='Prevent any prefill (only used in vllm)'
+    )
     return parser.parse_args()
 
 
@@ -366,6 +371,10 @@ if __name__ == '__main__':
                 outputs = model.generate(test_data, prefill='')
 
         elif args.backend == 'hf':
+            import psutil, gc
+            print(f"CPU memory after model loading: {psutil.virtual_memory().used / (1024**3):.1f}GB")
+            gc.collect()
+            print("START MAPPING OUTSIDE", flush=True)
             if args.reduce_few_shot:
                 test_data = test_data.map(
                     format_problem,
@@ -387,20 +396,33 @@ if __name__ == '__main__':
                     load_from_cache_file=False,
                     fn_kwargs={
                         'model_template': hf_template,
-                        'few_shot_examples': fs_data,
+                        'few_shot_examples': fs_data if args.few_shot_num else None,
                         'few_shot_num': args.few_shot_num,
                         'cot': args.cot,
                     },
                 )
+            print("FINISH MAPPING OUTSIDE", flush=True)
+            print("START GENERATING OUTSIDE", flush=True)
+            
             outputs = model.generate(
-                test_data, prefill='\n正確答案：(', apply_chat_template=args.apply_chat_template
+                test_data, prefill='\n<think>', apply_chat_template=args.apply_chat_template
             )
+            print("FINISH GENERATING OUTSIDE", flush=True)
 
         else:
-            if args.cot:
-                prefill = '\n讓我們一步一步思考。\n'
+            if args.freeform and args.cot:
+                prefill='<think>'
+            elif args.cot:
+                prefill = '讓我們一步一步思考。\n'
+            elif args.freeform:
+                prefill = ''
             else:
-                prefill = '\n正確答案：('
+                prefill = '正確答案：('
+            
+            if args.apply_chat_template:
+                prefill = "\n" + prefill
+
+            print("MAPPING OUTSIDE")
 
             if args.reduce_few_shot:
                 test_data = test_data.map(
@@ -423,12 +445,12 @@ if __name__ == '__main__':
                     load_from_cache_file=False,
                     fn_kwargs={
                         'model_template': hf_template,
-                        'few_shot_examples': fs_data,
+                        'few_shot_examples': fs_data if args.few_shot_num else None,
                         'few_shot_num': args.few_shot_num,
                         'cot': args.cot,
                     },
                 )
-
+            print("FINISH MAPPING OUTSIDE")
             outputs = model.generate(
                 test_data, prefill=prefill, apply_chat_template=args.apply_chat_template
             )
